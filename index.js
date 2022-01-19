@@ -51,6 +51,13 @@ export async function setupRuby(options = {}) {
   createGemRC(engine, version)
   envPreInstall()
 
+  // JRuby can use compiled extension code, so make sure gcc exists.
+  // As of Jan-2022, JRuby compiles against msvcrt.
+  if (platform.startsWith('windows') && (engine === 'jruby') && 
+    !fs.existsSync('C:\\msys64\\mingw64\\bin\\gcc.exe')) {
+    await require('./windows').installJRubyTools()
+  }
+
   const rubyPrefix = await installer.install(platform, engine, version)
 
   // When setup-ruby is used by other actions, this allows code in them to run
@@ -91,13 +98,13 @@ function parseRubyEngineAndVersion(rubyVersion) {
     console.log(`Using ${rubyVersion} as input from file .ruby-version`)
   } else if (rubyVersion === '.tool-versions') { // Read from .tool-versions
     const toolVersions = fs.readFileSync('.tool-versions', 'utf8').trim()
-    const rubyLine = toolVersions.split(/\r?\n/).filter(e => e.match(/^ruby\s/))[0]
+    const rubyLine = toolVersions.split(/\r?\n/).filter(e => /^ruby\s/.test(e))[0]
     rubyVersion = rubyLine.match(/^ruby\s+(.+)$/)[1]
     console.log(`Using ${rubyVersion} as input from file .tool-versions`)
   }
 
   let engine, version
-  if (rubyVersion.match(/^(\d+)/) || common.isHeadVersion(rubyVersion)) { // X.Y.Z => ruby-X.Y.Z
+  if (/^(\d+)/.test(rubyVersion) || common.isHeadVersion(rubyVersion)) { // X.Y.Z => ruby-X.Y.Z
     engine = 'ruby'
     version = rubyVersion
   } else if (!rubyVersion.includes('-')) { // myruby -> myruby-stableVersion

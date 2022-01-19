@@ -88,7 +88,7 @@ async function installBundler(bundlerVersionInput, lockFile, platform, rubyPrefi
   if (engine === 'ruby' && common.floatVersion(rubyVersion) <= 2.2) {
     console.log('Bundler 2 requires Ruby 2.3+, using Bundler 1 on Ruby <= 2.2')
     bundlerVersion = '1'
-  } else if (engine === 'ruby' && rubyVersion.match(/^2\.3\.[01]/)) {
+  } else if (engine === 'ruby' && /^2\.3\.[01]/.test(rubyVersion)) {
     console.log('Ruby 2.3.0 and 2.3.1 have shipped with an old rubygems that only works with Bundler 1')
     bundlerVersion = '1'
   } else if (engine === 'jruby' && rubyVersion.startsWith('9.1')) { // JRuby 9.1 targets Ruby 2.3, treat it the same
@@ -104,8 +104,10 @@ async function installBundler(bundlerVersionInput, lockFile, platform, rubyPrefi
     console.log(`Using Bundler 1 shipped with ${engine}-${rubyVersion}`)
   } else {
     const gem = path.join(rubyPrefix, 'bin', 'gem')
-    const bundlerVersionConstraint = bundlerVersion.match(/^\d+\.\d+\.\d+/) ? bundlerVersion : `~> ${bundlerVersion}`
-    await exec.exec(gem, ['install', 'bundler', '-v', bundlerVersionConstraint])
+    const bundlerVersionConstraint = /^\d+\.\d+\.\d+/.test(bundlerVersion) ? bundlerVersion : `~> ${bundlerVersion}`
+    // Workaround for https://github.com/rubygems/rubygems/issues/5245
+    const force = (platform.startsWith('windows-') && engine === 'ruby' && common.floatVersion(rubyVersion) >= 3.1) ? ['--force'] : []
+    await exec.exec(gem, ['install', 'bundler', ...force, '-v', bundlerVersionConstraint])
   }
 
   return bundlerVersion
@@ -197,17 +199,21 @@ async function computeBaseKey(platform, engine, version, lockFile, cacheVersion)
   const cacheVersionSuffix = DEFAULT_CACHE_VERSION === cacheVersion ? '' : `-cachever:${cacheVersion}`
   let key = `setup-ruby-bundler-cache-v3-${platform}-${engine}-${version}${cacheVersionSuffix}`
 
-  if (engine !== 'jruby' && common.isHeadVersion(version)) {
-    let revision = '';
-    await exec.exec('ruby', ['-e', 'print RUBY_REVISION'], {
-      silent: true,
-      listeners: {
-        stdout: (data) => {
-          revision += data.toString();
+  if (common.isHeadVersion(version)) {
+    if (engine !== 'jruby') {
+      // CRuby dev versions do not change the ABI version when the ABI changes, so use the commit as the ABI version
+      let print_abi = engine === 'ruby' ? 'print RUBY_REVISION' : "print RbConfig::CONFIG['ruby_version']"
+      let abi = ''
+      await exec.exec('ruby', ['-e', print_abi], {
+        silent: true,
+        listeners: {
+          stdout: (data) => {
+            abi += data.toString();
+          }
         }
-      }
-    });
-    key += `-revision-${revision}`
+      });
+      key += `-ABI-${abi}`
+    }
   }
 
   key += `-${lockFile}`
@@ -290,7 +296,7 @@ async function measure(name, block) {
 }
 
 function isHeadVersion(rubyVersion) {
-  return rubyVersion === 'head' || rubyVersion === 'debug' || rubyVersion === 'mingw' || rubyVersion === 'mswin'
+  return ['head', 'debug',  'mingw', 'mswin', 'ucrt'].includes(rubyVersion)
 }
 
 function isStableVersion(rubyVersion) {
@@ -397,7 +403,15 @@ function win2nix(path) {
   return path.replace(/\\/g, '/').replace(/ /g, '\\ ')
 }
 
+// JRuby is installed after setupPath is called, so folder doesn't exist
+function rubyIsUCRT(path) {
+  return !!(fs.existsSync(path) &&
+    fs.readdirSync(path, { withFileTypes: true }).find(dirent =>
+      dirent.isFile() && dirent.name.match(/^x64-ucrt-ruby\d{3}\.dll$/)))
+}
+
 function setupPath(newPathEntries) {
+  let msys2Type = null
   const envPath = windows ? 'Path' : 'PATH'
   const originalPath = process.env[envPath].split(path.delimiter)
   let cleanPath = originalPath.filter(entry => !/\bruby\b/i.test(entry))
@@ -418,8 +432,11 @@ function setupPath(newPathEntries) {
   // Then add new path entries using core.addPath()
   let newPath
   if (windows) {
+    // main Ruby dll determines whether mingw or ucrt build
+    msys2Type = rubyIsUCRT(newPathEntries[0]) ? 'ucrt64' : 'mingw64'
+
     // add MSYS2 in path for all Rubies on Windows, as it provides a better bash shell and a native toolchain
-    const msys2 = ['C:\\msys64\\mingw64\\bin', 'C:\\msys64\\usr\\bin']
+    const msys2 = [`C:\\msys64\\${msys2Type}\\bin`, 'C:\\msys64\\usr\\bin']
     newPath = [...newPathEntries, ...msys2]
   } else {
     newPath = newPathEntries
@@ -431,6 +448,7 @@ function setupPath(newPathEntries) {
   core.endGroup()
 
   core.addPath(newPath.join(path.delimiter))
+  return msys2Type
 }
 
 
@@ -532,7 +550,7 @@ function restoreCache(paths, primaryKey, restoreKeys, options) {
             if (core.isDebug()) {
                 yield tar_1.listTar(archivePath, compressionMethod);
             }
-            const archiveFileSize = utils.getArchiveFileSizeIsBytes(archivePath);
+            const archiveFileSize = utils.getArchiveFileSizeInBytes(archivePath);
             core.info(`Cache Size: ~${Math.round(archiveFileSize / (1024 * 1024))} MB (${archiveFileSize} B)`);
             yield tar_1.extractTar(archivePath, compressionMethod);
             core.info('Cache restored successfully');
@@ -577,18 +595,29 @@ function saveCache(paths, key, options) {
         const archiveFolder = yield utils.createTempDirectory();
         const archivePath = path.join(archiveFolder, utils.getCacheFileName(compressionMethod));
         core.debug(`Archive Path: ${archivePath}`);
-        yield tar_1.createTar(archiveFolder, cachePaths, compressionMethod);
-        if (core.isDebug()) {
-            yield tar_1.listTar(archivePath, compressionMethod);
+        try {
+            yield tar_1.createTar(archiveFolder, cachePaths, compressionMethod);
+            if (core.isDebug()) {
+                yield tar_1.listTar(archivePath, compressionMethod);
+            }
+            const fileSizeLimit = 10 * 1024 * 1024 * 1024; // 10GB per repo limit
+            const archiveFileSize = utils.getArchiveFileSizeInBytes(archivePath);
+            core.debug(`File Size: ${archiveFileSize}`);
+            if (archiveFileSize > fileSizeLimit) {
+                throw new Error(`Cache size of ~${Math.round(archiveFileSize / (1024 * 1024))} MB (${archiveFileSize} B) is over the 10GB limit, not saving cache.`);
+            }
+            core.debug(`Saving Cache (ID: ${cacheId})`);
+            yield cacheHttpClient.saveCache(cacheId, archivePath, options);
         }
-        const fileSizeLimit = 5 * 1024 * 1024 * 1024; // 5GB per repo limit
-        const archiveFileSize = utils.getArchiveFileSizeIsBytes(archivePath);
-        core.debug(`File Size: ${archiveFileSize}`);
-        if (archiveFileSize > fileSizeLimit) {
-            throw new Error(`Cache size of ~${Math.round(archiveFileSize / (1024 * 1024))} MB (${archiveFileSize} B) is over the 5GB limit, not saving cache.`);
+        finally {
+            // Try to delete the archive to save space
+            try {
+                yield utils.unlinkFile(archivePath);
+            }
+            catch (error) {
+                core.debug(`Failed to delete archive: ${error}`);
+            }
         }
-        core.debug(`Saving Cache (ID: ${cacheId})`);
-        yield cacheHttpClient.saveCache(cacheId, archivePath, options);
         return cacheId;
     });
 }
@@ -756,7 +785,7 @@ function uploadChunk(httpClient, resourceUrl, openStream, start, end) {
 function uploadFile(httpClient, cacheId, archivePath, options) {
     return __awaiter(this, void 0, void 0, function* () {
         // Upload Chunks
-        const fileSize = fs.statSync(archivePath).size;
+        const fileSize = utils.getArchiveFileSizeInBytes(archivePath);
         const resourceUrl = getCacheApiUrl(`caches/${cacheId.toString()}`);
         const fd = fs.openSync(archivePath, 'r');
         const uploadOptions = options_1.getUploadOptions(options);
@@ -806,7 +835,7 @@ function saveCache(cacheId, archivePath, options) {
         yield uploadFile(httpClient, cacheId, archivePath, options);
         // Commit Cache
         core.debug('Commiting cache');
-        const cacheSize = utils.getArchiveFileSizeIsBytes(archivePath);
+        const cacheSize = utils.getArchiveFileSizeInBytes(archivePath);
         core.info(`Cache Size: ~${Math.round(cacheSize / (1024 * 1024))} MB (${cacheSize} B)`);
         const commitCacheResponse = yield commitCache(httpClient, cacheId, cacheSize);
         if (!requestUtils_1.isSuccessStatusCode(commitCacheResponse.statusCode)) {
@@ -886,10 +915,10 @@ function createTempDirectory() {
     });
 }
 exports.createTempDirectory = createTempDirectory;
-function getArchiveFileSizeIsBytes(filePath) {
+function getArchiveFileSizeInBytes(filePath) {
     return fs.statSync(filePath).size;
 }
-exports.getArchiveFileSizeIsBytes = getArchiveFileSizeIsBytes;
+exports.getArchiveFileSizeInBytes = getArchiveFileSizeInBytes;
 function resolvePaths(patterns) {
     var e_1, _a;
     var _b;
@@ -1194,7 +1223,7 @@ function downloadCacheHttpClient(archiveLocation, archivePath) {
         const contentLengthHeader = downloadResponse.message.headers['content-length'];
         if (contentLengthHeader) {
             const expectedLength = parseInt(contentLengthHeader);
-            const actualLength = utils.getArchiveFileSizeIsBytes(archivePath);
+            const actualLength = utils.getArchiveFileSizeInBytes(archivePath);
             if (actualLength !== expectedLength) {
                 throw new Error(`Incomplete download. Expected file size: ${expectedLength}, actual file size: ${actualLength}`);
             }
@@ -58770,24 +58799,26 @@ function getVersions(platform) {
       "2.3.0", "2.3.1", "2.3.2", "2.3.3", "2.3.4", "2.3.5", "2.3.6", "2.3.7", "2.3.8",
       "2.4.0", "2.4.1", "2.4.2", "2.4.3", "2.4.4", "2.4.5", "2.4.6", "2.4.7", "2.4.9", "2.4.10",
       "2.5.0", "2.5.1", "2.5.2", "2.5.3", "2.5.4", "2.5.5", "2.5.6", "2.5.7", "2.5.8", "2.5.9",
-      "2.6.0", "2.6.1", "2.6.2", "2.6.3", "2.6.4", "2.6.5", "2.6.6", "2.6.7", "2.6.8",
-      "2.7.0", "2.7.1", "2.7.2", "2.7.3", "2.7.4",
-      "3.0.0-preview1", "3.0.0-preview2", "3.0.0-rc1", "3.0.0", "3.0.1", "3.0.2",
+      "2.6.0", "2.6.1", "2.6.2", "2.6.3", "2.6.4", "2.6.5", "2.6.6", "2.6.7", "2.6.8", "2.6.9",
+      "2.7.0", "2.7.1", "2.7.2", "2.7.3", "2.7.4", "2.7.5",
+      "3.0.0-preview1", "3.0.0-preview2", "3.0.0-rc1", "3.0.0", "3.0.1", "3.0.2", "3.0.3",
+      "3.1.0-preview1", "3.1.0",
       "head", "debug"
     ],
     "jruby": [
       "9.1.17.0",
-      "9.2.9.0", "9.2.10.0", "9.2.11.0", "9.2.11.1", "9.2.12.0", "9.2.13.0", "9.2.14.0", "9.2.15.0", "9.2.16.0", "9.2.17.0", "9.2.18.0", "9.2.19.0",
+      "9.2.9.0", "9.2.10.0", "9.2.11.0", "9.2.11.1", "9.2.12.0", "9.2.13.0", "9.2.14.0", "9.2.15.0", "9.2.16.0", "9.2.17.0", "9.2.18.0", "9.2.19.0", "9.2.20.0", "9.2.20.1",
+      "9.3.0.0", "9.3.1.0", "9.3.2.0",
       "head"
     ],
     "truffleruby": [
       "19.3.0", "19.3.1",
       "20.0.0", "20.1.0", "20.2.0", "20.3.0",
-      "21.0.0", "21.1.0", "21.2.0", "21.2.0.1",
+      "21.0.0", "21.1.0", "21.2.0", "21.2.0.1", "21.3.0",
       "head"
     ],
     "truffleruby+graalvm": [
-      "21.2.0",
+      "21.2.0", "21.3.0",
       "head"
     ]
   }
@@ -58888,7 +58919,7 @@ async function downloadAndExtract(platform, engine, version, rubyPrefix) {
     return await tc.downloadTool(url)
   })
 
-  await common.measure('Extracting Ruby', async () => {
+  await common.measure('Extracting  Ruby', async () => {
     if (windows) {
       // Windows 2016 doesn't have system tar, use MSYS2's, it needs unix style paths
       await exec.exec('tar', ['-xz', '-C', common.win2nix(parentDir), '-f', common.win2nix(downloadPath)])
@@ -58964,17 +58995,22 @@ const versions = {
   "2.6.6": "https://github.com/oneclick/rubyinstaller2/releases/download/RubyInstaller-2.6.6-2/rubyinstaller-2.6.6-2-x64.7z",
   "2.6.7": "https://github.com/oneclick/rubyinstaller2/releases/download/RubyInstaller-2.6.7-1/rubyinstaller-2.6.7-1-x64.7z",
   "2.6.8": "https://github.com/oneclick/rubyinstaller2/releases/download/RubyInstaller-2.6.8-1/rubyinstaller-2.6.8-1-x64.7z",
+  "2.6.9": "https://github.com/oneclick/rubyinstaller2/releases/download/RubyInstaller-2.6.9-1/rubyinstaller-2.6.9-1-x64.7z",
   "2.7.0": "https://github.com/oneclick/rubyinstaller2/releases/download/RubyInstaller-2.7.0-1/rubyinstaller-2.7.0-1-x64.7z",
   "2.7.1": "https://github.com/oneclick/rubyinstaller2/releases/download/RubyInstaller-2.7.1-1/rubyinstaller-2.7.1-1-x64.7z",
   "2.7.2": "https://github.com/oneclick/rubyinstaller2/releases/download/RubyInstaller-2.7.2-1/rubyinstaller-2.7.2-1-x64.7z",
   "2.7.3": "https://github.com/oneclick/rubyinstaller2/releases/download/RubyInstaller-2.7.3-1/rubyinstaller-2.7.3-1-x64.7z",
   "2.7.4": "https://github.com/oneclick/rubyinstaller2/releases/download/RubyInstaller-2.7.4-1/rubyinstaller-2.7.4-1-x64.7z",
+  "2.7.5": "https://github.com/oneclick/rubyinstaller2/releases/download/RubyInstaller-2.7.5-1/rubyinstaller-2.7.5-1-x64.7z",
   "3.0.0": "https://github.com/oneclick/rubyinstaller2/releases/download/RubyInstaller-3.0.0-1/rubyinstaller-3.0.0-1-x64.7z",
   "3.0.1": "https://github.com/oneclick/rubyinstaller2/releases/download/RubyInstaller-3.0.1-1/rubyinstaller-3.0.1-1-x64.7z",
   "3.0.2": "https://github.com/oneclick/rubyinstaller2/releases/download/RubyInstaller-3.0.2-1/rubyinstaller-3.0.2-1-x64.7z",
+  "3.0.3": "https://github.com/oneclick/rubyinstaller2/releases/download/RubyInstaller-3.0.3-1/rubyinstaller-3.0.3-1-x64.7z",
+  "3.1.0": "https://github.com/oneclick/rubyinstaller2/releases/download/RubyInstaller-3.1.0-1/rubyinstaller-3.1.0-1-x64.7z",
   "head": "https://github.com/oneclick/rubyinstaller2/releases/download/rubyinstaller-head/rubyinstaller-head-x64.7z",
   "mingw": "https://github.com/MSP-Greg/ruby-loco/releases/download/ruby-master/ruby-mingw.7z",
-  "mswin": "https://github.com/MSP-Greg/ruby-loco/releases/download/ruby-master/ruby-mswin.7z"
+  "mswin": "https://github.com/MSP-Greg/ruby-loco/releases/download/ruby-master/ruby-mswin.7z",
+  "ucrt": "https://github.com/MSP-Greg/ruby-loco/releases/download/ruby-master/ruby-ucrt.7z"
 }
 
 
@@ -58988,6 +59024,7 @@ __nccwpck_require__.r(__webpack_exports__);
 /* harmony export */ __nccwpck_require__.d(__webpack_exports__, {
 /* harmony export */   "getAvailableVersions": () => (/* binding */ getAvailableVersions),
 /* harmony export */   "install": () => (/* binding */ install),
+/* harmony export */   "installJRubyTools": () => (/* binding */ installJRubyTools),
 /* harmony export */   "addVCVARSEnv": () => (/* binding */ addVCVARSEnv)
 /* harmony export */ });
 // Most of this logic is from
@@ -59005,12 +59042,16 @@ const rubyInstallerVersions = __nccwpck_require__(7223)/* .versions */ .d
 
 const drive = common.drive
 
+const msys2BasePath = 'C:\\msys64'
+
 // needed for 2.0-2.3, and mswin, cert file used by Git for Windows
 const certFile = 'C:\\Program Files\\Git\\mingw64\\ssl\\cert.pem'
 
-// location & path for old RubyInstaller DevKit (MSYS), Ruby 2.0-2.3
-const msys = `${drive}:\\DevKit64`
-const msysPathEntries = [`${msys}\\mingw\\x86_64-w64-mingw32\\bin`, `${msys}\\mingw\\bin`, `${msys}\\bin`]
+// location & path for old RubyInstaller DevKit (MSYS1), Ruby 2.0-2.3
+const msys1 = `${drive}:\\DevKit64`
+const msysPathEntries = [`${msys1}\\mingw\\x86_64-w64-mingw32\\bin`, `${msys1}\\mingw\\bin`, `${msys1}\\bin`]
+
+const virtualEnv = common.getVirtualEnvironmentName()
 
 function getAvailableVersions(platform, engine) {
   if (engine === 'ruby') {
@@ -59022,6 +59063,10 @@ function getAvailableVersions(platform, engine) {
 
 async function install(platform, engine, version) {
   const url = rubyInstallerVersions[version]
+
+  // The windows-2016 and windows-2019 images have MSYS2 build tools (C:/msys64/usr)
+  // and MinGW build tools installed.  The windows-2022 image has neither.
+  const hasMSYS2PreInstalled = ['windows-2019', 'windows-2016'].includes(virtualEnv)
 
   if (!url.endsWith('.7z')) {
     throw new Error(`URL should end in .7z: ${url}`)
@@ -59042,13 +59087,69 @@ async function install(platform, engine, version) {
 
   let toolchainPaths = (version === 'mswin') ? await setupMSWin() : await setupMingw(version)
 
-  common.setupPath([`${rubyPrefix}\\bin`, ...toolchainPaths])
-
   if (!inToolCache) {
     await downloadAndExtract(engine, version, url, base, rubyPrefix);
   }
 
+  const msys2Type = common.setupPath([`${rubyPrefix}\\bin`, ...toolchainPaths])
+
+  // install msys2 tools for all Ruby versions, only install mingw or ucrt for Rubies >= 2.4
+
+  if (!hasMSYS2PreInstalled) {
+    await installMSYS2Tools()
+  }
+
+  // windows 2016 and 2019 need ucrt64 installed, 2022 and future images need
+  // ucrt64 or mingw64 installed, depending on Ruby version
+  if (((msys2Type === 'ucrt64') || !hasMSYS2PreInstalled) && common.floatVersion(version) >= 2.4) {
+    await installGCCTools(msys2Type)
+  }
+
+  const ridk = `${rubyPrefix}\\bin\\ridk.cmd`
+  if (fs.existsSync(ridk)) {
+    await common.measure('Adding ridk env variables', async () => addRidkEnv(ridk))
+  }
+
   return rubyPrefix
+}
+
+// Actions windows-2022 image does not contain any mingw or ucrt build tools.  Install tools for it,
+// and also install ucrt tools on earlier versions, which have msys2 and mingw tools preinstalled.
+async function installGCCTools(type) {
+  const downloadPath = await common.measure(`Downloading ${type} build tools`, async () => {
+    let url = `https://github.com/MSP-Greg/setup-msys2-gcc/releases/download/msys2-gcc-pkgs/${type}.7z`
+    console.log(url)
+    return await tc.downloadTool(url)
+  })
+
+  await common.measure(`Extracting  ${type} build tools`, async () =>
+    // -aoa overwrite existing, -bd disable progress indicator
+    exec.exec('7z', ['x', downloadPath, '-aoa', '-bd', `-o${msys2BasePath}`], { silent: true }))
+}
+
+// Actions windows-2022 image does not contain any MSYS2 build tools.  Install tools for it.
+// A subset of the MSYS2 base-devel group
+async function installMSYS2Tools() {
+  const downloadPath = await common.measure(`Downloading msys2 build tools`, async () => {
+    let url = `https://github.com/MSP-Greg/setup-msys2-gcc/releases/download/msys2-gcc-pkgs/msys2.7z`
+    console.log(url)
+    return await tc.downloadTool(url)
+  })
+
+  // need to remove all directories, since they may indicate old packages are installed,
+  // otherwise, error of "error: duplicated database entry"
+  fs.rmdirSync(`${msys2BasePath}\\var\\lib\\pacman\\local`, { recursive: true, force: true })
+
+  await common.measure(`Extracting  msys2 build tools`, async () =>
+    // -aoa overwrite existing, -bd disable progress indicator
+    exec.exec('7z', ['x', downloadPath, '-aoa', '-bd', `-o${msys2BasePath}`], { silent: true }))
+}
+
+// Windows JRuby can install gems that require compile tools, only needed for
+// windows-2022 and later images
+async function installJRubyTools() {
+  await installMSYS2Tools()
+  await installGCCTools('mingw64')
 }
 
 async function downloadAndExtract(engine, version, url, base, rubyPrefix) {
@@ -59059,8 +59160,9 @@ async function downloadAndExtract(engine, version, url, base, rubyPrefix) {
     return await tc.downloadTool(url)
   })
 
-  await common.measure('Extracting Ruby', async () =>
-    exec.exec('7z', ['x', downloadPath, `-xr!${base}\\share\\doc`, `-o${parentDir}`], { silent: true }))
+  await common.measure('Extracting  Ruby', async () =>
+    // -bd disable progress indicator, -xr extract but exclude share\doc files
+    exec.exec('7z', ['x', downloadPath, '-bd', `-xr!${base}\\share\\doc`, `-o${parentDir}`], { silent: true }))
 
   if (base !== path.basename(rubyPrefix)) {
     await io.mv(path.join(parentDir, base), rubyPrefix)
@@ -59074,23 +59176,29 @@ async function downloadAndExtract(engine, version, url, base, rubyPrefix) {
 async function setupMingw(version) {
   core.exportVariable('MAKE', 'make.exe')
 
+  // rename these to avoid confusion when Ruby is using OpenSSL 1.0.2.
+  // most current extconf files look for 1.1.x dll files first, which is the version of the renamed files
+  if (common.floatVersion(version) <= 2.4) {
+    renameSystem32Dlls()
+  }
+
   if (common.floatVersion(version) <= 2.3) {
     core.exportVariable('SSL_CERT_FILE', certFile)
-    await common.measure('Installing MSYS', async () => installMSYS(version))
+    await common.measure('Installing MSYS1', async () => installMSYS1(version))
     return msysPathEntries
   } else {
     return []
   }
 }
 
-// Ruby 2.0, 2.1, 2.2 and 2.3
-async function installMSYS(version) {
+// Ruby 2.0-2.3
+async function installMSYS1(version) {
   const url = 'https://github.com/oneclick/rubyinstaller/releases/download/devkit-4.7.2/DevKit-mingw64-64-4.7.2-20130224-1432-sfx.exe'
   const downloadPath = await tc.downloadTool(url)
-  await exec.exec('7z', ['x', downloadPath, `-o${msys}`], { silent: true })
+  await exec.exec('7z', ['x', downloadPath, `-o${msys1}`], { silent: true })
 
   // below are set in the old devkit.rb file ?
-  core.exportVariable('RI_DEVKIT', msys)
+  core.exportVariable('RI_DEVKIT', msys1)
   core.exportVariable('CC' , 'gcc')
   core.exportVariable('CXX', 'g++')
   core.exportVariable('CPP', 'cpp')
@@ -59118,15 +59226,28 @@ async function setupMSWin() {
 /* Sets MSVC environment for use in Actions
  *   allows steps to run without running vcvars*.bat, also for PowerShell
  *   adds a convenience VCVARS environment variable
- *   this assumes a single Visual Studio version being available in the windows-latest image */
+ *   this assumes a single Visual Studio version being available in the Windows images */
 function addVCVARSEnv() {
-  const vcVars = '"C:\\Program Files (x86)\\Microsoft Visual Studio\\2019\\Enterprise\\VC\\Auxiliary\\Build\\vcvars64.bat"'
+  let vcVars = ''
+  switch (virtualEnv) {
+    case 'windows-2016':
+      vcVars = '"C:\\Program Files (x86)\\Microsoft Visual Studio\\2017\\Enterprise\\VC\\Auxiliary\\Build\\vcvars64.bat"'
+      break
+    case 'windows-2019':
+      vcVars = '"C:\\Program Files (x86)\\Microsoft Visual Studio\\2019\\Enterprise\\VC\\Auxiliary\\Build\\vcvars64.bat"'
+      break
+    case 'windows-2022':
+      vcVars = '"C:\\Program Files\\Microsoft Visual Studio\\2022\\Enterprise\\VC\\Auxiliary\\Build\\vcvars64.bat"'
+      break
+    default:
+      throw new Error(`Unknown Windows Image: ${virtualEnv}`)
+  }
   core.exportVariable('VCVARS', vcVars)
 
   let newEnv = new Map()
   let cmd = `cmd.exe /c "${vcVars} && set"`
   let newSet = cp.execSync(cmd).toString().trim().split(/\r?\n/)
-  newSet = newSet.filter(line => line.match(/\S=\S/))
+  newSet = newSet.filter(line => /\S=\S/.test(line))
   newSet.forEach(s => {
     let [k,v] = common.partition(s, '=')
     newEnv.set(k,v)
@@ -59144,6 +59265,38 @@ function addVCVARSEnv() {
     }
   }
   return newPathEntries
+}
+
+// ssl files cause issues with non RI2 Rubies (<2.4) and ruby/ruby's CI from build folder due to dll resolution
+function renameSystem32Dlls() {
+  const sys32 = 'C:\\Windows\\System32\\'
+  const badFiles = [`${sys32}libcrypto-1_1-x64.dll`, `${sys32}libssl-1_1-x64.dll`]
+  const existing = badFiles.filter((dll) => fs.existsSync(dll))
+  if (existing.length > 0) {
+    console.log(`Renaming ${existing.join(' and ')} to avoid dll resolution conflicts on Ruby <= 2.4`)
+    existing.forEach(dll => fs.renameSync(dll, `${dll}_`))
+  }
+}
+
+// Sets MSYS2 ENV variables set from running `ridk enable`
+function addRidkEnv(ridk) {
+  let newEnv = new Map()
+  let cmd = `cmd.exe /c "${ridk} enable && set"`
+  let newSet = cp.execSync(cmd).toString().trim().split(/\r?\n/)
+  newSet = newSet.filter(line => /^\S+=\S+/.test(line))
+  newSet.forEach(s => {
+    let [k, v] = common.partition(s, '=')
+    newEnv.set(k, v)
+  })
+
+  for (let [k, v] of newEnv) {
+    if (process.env[k] !== v) {
+      if (!/^Path$/i.test(k)) {
+        console.log(`${k}=${v}`)
+        core.exportVariable(k, v)
+      }
+    }
+  }
 }
 
 
@@ -59177,7 +59330,7 @@ module.exports = JSON.parse('["ac","com.ac","edu.ac","gov.ac","net.ac","mil.ac",
 /***/ ((module) => {
 
 "use strict";
-module.exports = require("assert");;
+module.exports = require("assert");
 
 /***/ }),
 
@@ -59185,7 +59338,7 @@ module.exports = require("assert");;
 /***/ ((module) => {
 
 "use strict";
-module.exports = require("buffer");;
+module.exports = require("buffer");
 
 /***/ }),
 
@@ -59193,7 +59346,7 @@ module.exports = require("buffer");;
 /***/ ((module) => {
 
 "use strict";
-module.exports = require("child_process");;
+module.exports = require("child_process");
 
 /***/ }),
 
@@ -59201,7 +59354,7 @@ module.exports = require("child_process");;
 /***/ ((module) => {
 
 "use strict";
-module.exports = require("crypto");;
+module.exports = require("crypto");
 
 /***/ }),
 
@@ -59209,7 +59362,7 @@ module.exports = require("crypto");;
 /***/ ((module) => {
 
 "use strict";
-module.exports = require("events");;
+module.exports = require("events");
 
 /***/ }),
 
@@ -59217,7 +59370,7 @@ module.exports = require("events");;
 /***/ ((module) => {
 
 "use strict";
-module.exports = require("fs");;
+module.exports = require("fs");
 
 /***/ }),
 
@@ -59225,7 +59378,7 @@ module.exports = require("fs");;
 /***/ ((module) => {
 
 "use strict";
-module.exports = require("http");;
+module.exports = require("http");
 
 /***/ }),
 
@@ -59233,7 +59386,7 @@ module.exports = require("http");;
 /***/ ((module) => {
 
 "use strict";
-module.exports = require("https");;
+module.exports = require("https");
 
 /***/ }),
 
@@ -59241,7 +59394,7 @@ module.exports = require("https");;
 /***/ ((module) => {
 
 "use strict";
-module.exports = require("net");;
+module.exports = require("net");
 
 /***/ }),
 
@@ -59249,7 +59402,7 @@ module.exports = require("net");;
 /***/ ((module) => {
 
 "use strict";
-module.exports = require("os");;
+module.exports = require("os");
 
 /***/ }),
 
@@ -59257,7 +59410,7 @@ module.exports = require("os");;
 /***/ ((module) => {
 
 "use strict";
-module.exports = require("path");;
+module.exports = require("path");
 
 /***/ }),
 
@@ -59265,7 +59418,7 @@ module.exports = require("path");;
 /***/ ((module) => {
 
 "use strict";
-module.exports = require("perf_hooks");;
+module.exports = require("perf_hooks");
 
 /***/ }),
 
@@ -59273,7 +59426,7 @@ module.exports = require("perf_hooks");;
 /***/ ((module) => {
 
 "use strict";
-module.exports = require("punycode");;
+module.exports = require("punycode");
 
 /***/ }),
 
@@ -59281,7 +59434,7 @@ module.exports = require("punycode");;
 /***/ ((module) => {
 
 "use strict";
-module.exports = require("stream");;
+module.exports = require("stream");
 
 /***/ }),
 
@@ -59289,7 +59442,7 @@ module.exports = require("stream");;
 /***/ ((module) => {
 
 "use strict";
-module.exports = require("string_decoder");;
+module.exports = require("string_decoder");
 
 /***/ }),
 
@@ -59297,7 +59450,7 @@ module.exports = require("string_decoder");;
 /***/ ((module) => {
 
 "use strict";
-module.exports = require("timers");;
+module.exports = require("timers");
 
 /***/ }),
 
@@ -59305,7 +59458,7 @@ module.exports = require("timers");;
 /***/ ((module) => {
 
 "use strict";
-module.exports = require("tls");;
+module.exports = require("tls");
 
 /***/ }),
 
@@ -59313,7 +59466,7 @@ module.exports = require("tls");;
 /***/ ((module) => {
 
 "use strict";
-module.exports = require("url");;
+module.exports = require("url");
 
 /***/ }),
 
@@ -59321,7 +59474,7 @@ module.exports = require("url");;
 /***/ ((module) => {
 
 "use strict";
-module.exports = require("util");;
+module.exports = require("util");
 
 /***/ }),
 
@@ -59329,7 +59482,7 @@ module.exports = require("util");;
 /***/ ((module) => {
 
 "use strict";
-module.exports = require("zlib");;
+module.exports = require("zlib");
 
 /***/ })
 
@@ -59396,7 +59549,9 @@ module.exports = require("zlib");;
 /******/ 	
 /******/ 	/* webpack/runtime/compat */
 /******/ 	
-/******/ 	if (typeof __nccwpck_require__ !== 'undefined') __nccwpck_require__.ab = __dirname + "/";/************************************************************************/
+/******/ 	if (typeof __nccwpck_require__ !== 'undefined') __nccwpck_require__.ab = __dirname + "/";
+/******/ 	
+/************************************************************************/
 var __webpack_exports__ = {};
 // This entry need to be wrapped in an IIFE because it need to be in strict mode.
 (() => {
@@ -59459,6 +59614,13 @@ async function setupRuby(options = {}) {
   createGemRC(engine, version)
   envPreInstall()
 
+  // JRuby can use compiled extension code, so make sure gcc exists.
+  // As of Jan-2022, JRuby compiles against msvcrt.
+  if (platform.startsWith('windows') && (engine === 'jruby') && 
+    !fs.existsSync('C:\\msys64\\mingw64\\bin\\gcc.exe')) {
+    await __nccwpck_require__(3216).installJRubyTools()
+  }
+
   const rubyPrefix = await installer.install(platform, engine, version)
 
   // When setup-ruby is used by other actions, this allows code in them to run
@@ -59499,13 +59661,13 @@ function parseRubyEngineAndVersion(rubyVersion) {
     console.log(`Using ${rubyVersion} as input from file .ruby-version`)
   } else if (rubyVersion === '.tool-versions') { // Read from .tool-versions
     const toolVersions = fs.readFileSync('.tool-versions', 'utf8').trim()
-    const rubyLine = toolVersions.split(/\r?\n/).filter(e => e.match(/^ruby\s/))[0]
+    const rubyLine = toolVersions.split(/\r?\n/).filter(e => /^ruby\s/.test(e))[0]
     rubyVersion = rubyLine.match(/^ruby\s+(.+)$/)[1]
     console.log(`Using ${rubyVersion} as input from file .tool-versions`)
   }
 
   let engine, version
-  if (rubyVersion.match(/^(\d+)/) || common.isHeadVersion(rubyVersion)) { // X.Y.Z => ruby-X.Y.Z
+  if (/^(\d+)/.test(rubyVersion) || common.isHeadVersion(rubyVersion)) { // X.Y.Z => ruby-X.Y.Z
     engine = 'ruby'
     version = rubyVersion
   } else if (!rubyVersion.includes('-')) { // myruby -> myruby-stableVersion
