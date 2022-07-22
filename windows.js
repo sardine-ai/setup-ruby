@@ -1,5 +1,5 @@
-// Most of this logic is from
-// https://github.com/MSP-Greg/actions-ruby/blob/master/lib/main.js
+// 7z arguments
+//   -aoa overwrite existing, -bd disable progress indicator
 
 const fs = require('fs')
 const path = require('path')
@@ -9,22 +9,29 @@ const exec = require('@actions/exec')
 const io = require('@actions/io')
 const tc = require('@actions/tool-cache')
 const common = require('./common')
-const rubyInstallerVersions = require('./windows-versions').versions
+const rubyInstallerVersions = require('./windows-versions.json')
 
 const drive = common.drive
 
-const msys2BasePath = 'C:\\msys64'
+const msys2GCCReleaseURI  = 'https://github.com/ruby/setup-msys2-gcc/releases/download'
 
-// needed for 2.0-2.3, and mswin, cert file used by Git for Windows
+const msys2BasePath = process.env['GHCUP_MSYS2']
+const vcPkgBasePath = process.env['VCPKG_INSTALLATION_ROOT']
+
+// needed for Ruby 2.0-2.3, and mswin, cert file used by Git for Windows
 const certFile = 'C:\\Program Files\\Git\\mingw64\\ssl\\cert.pem'
 
-// location & path for old RubyInstaller DevKit (MSYS1), Ruby 2.0-2.3
+// location & path for old RubyInstaller DevKit (MSYS1), used with Ruby 2.0-2.3
 const msys1 = `${drive}:\\DevKit64`
 const msysPathEntries = [`${msys1}\\mingw\\x86_64-w64-mingw32\\bin`, `${msys1}\\mingw\\bin`, `${msys1}\\bin`]
 
 const virtualEnv = common.getVirtualEnvironmentName()
 
 export function getAvailableVersions(platform, engine) {
+  if (!common.supportedPlatforms.includes(platform)) {
+    throw new Error(`Unsupported platform ${platform}`)
+  }
+
   if (engine === 'ruby') {
     return Object.keys(rubyInstallerVersions)
   } else {
@@ -76,6 +83,10 @@ export async function install(platform, engine, version) {
     await installGCCTools(msys2Type)
   }
 
+  if (version === 'mswin') {
+    await installVCPkg()
+  }
+
   const ridk = `${rubyPrefix}\\bin\\ridk.cmd`
   if (fs.existsSync(ridk)) {
     await common.measure('Adding ridk env variables', async () => addRidkEnv(ridk))
@@ -88,13 +99,12 @@ export async function install(platform, engine, version) {
 // and also install ucrt tools on earlier versions, which have msys2 and mingw tools preinstalled.
 async function installGCCTools(type) {
   const downloadPath = await common.measure(`Downloading ${type} build tools`, async () => {
-    let url = `https://github.com/MSP-Greg/setup-msys2-gcc/releases/download/msys2-gcc-pkgs/${type}.7z`
+    let url = `${msys2GCCReleaseURI}/msys2-gcc-pkgs/${type}.7z`
     console.log(url)
     return await tc.downloadTool(url)
   })
 
   await common.measure(`Extracting  ${type} build tools`, async () =>
-    // -aoa overwrite existing, -bd disable progress indicator
     exec.exec('7z', ['x', downloadPath, '-aoa', '-bd', `-o${msys2BasePath}`], { silent: true }))
 }
 
@@ -102,17 +112,16 @@ async function installGCCTools(type) {
 // A subset of the MSYS2 base-devel group
 async function installMSYS2Tools() {
   const downloadPath = await common.measure(`Downloading msys2 build tools`, async () => {
-    let url = `https://github.com/MSP-Greg/setup-msys2-gcc/releases/download/msys2-gcc-pkgs/msys2.7z`
+    let url = `${msys2GCCReleaseURI}/msys2-gcc-pkgs/msys2.7z`
     console.log(url)
     return await tc.downloadTool(url)
   })
 
   // need to remove all directories, since they may indicate old packages are installed,
   // otherwise, error of "error: duplicated database entry"
-  fs.rmdirSync(`${msys2BasePath}\\var\\lib\\pacman\\local`, { recursive: true, force: true })
+  fs.rmSync(`${msys2BasePath}\\var\\lib\\pacman\\local`, { recursive: true, force: true })
 
   await common.measure(`Extracting  msys2 build tools`, async () =>
-    // -aoa overwrite existing, -bd disable progress indicator
     exec.exec('7z', ['x', downloadPath, '-aoa', '-bd', `-o${msys2BasePath}`], { silent: true }))
 }
 
@@ -121,6 +130,18 @@ async function installMSYS2Tools() {
 export async function installJRubyTools() {
   await installMSYS2Tools()
   await installGCCTools('mingw64')
+}
+
+// Install vcpkg files needed to build mswin Ruby
+async function installVCPkg() {
+  const downloadPath = await common.measure(`Downloading mswin vcpkg packages`, async () => {
+    let url = `${msys2GCCReleaseURI}/msys2-gcc-pkgs/mswin.7z`
+    console.log(url)
+    return await tc.downloadTool(url)
+  })
+
+  await common.measure(`Extracting  mswin vcpkg packages`, async () =>
+    exec.exec('7z', ['x', downloadPath, '-aoa', '-bd', `-o${vcPkgBasePath}`], { silent: true }))
 }
 
 async function downloadAndExtract(engine, version, url, base, rubyPrefix) {
@@ -132,7 +153,7 @@ async function downloadAndExtract(engine, version, url, base, rubyPrefix) {
   })
 
   await common.measure('Extracting  Ruby', async () =>
-    // -bd disable progress indicator, -xr extract but exclude share\doc files
+    // -xr extract but exclude share\doc files
     exec.exec('7z', ['x', downloadPath, '-bd', `-xr!${base}\\share\\doc`, `-o${parentDir}`], { silent: true }))
 
   if (base !== path.basename(rubyPrefix)) {
@@ -179,17 +200,27 @@ async function installMSYS1(version) {
 async function setupMSWin() {
   core.exportVariable('MAKE', 'nmake.exe')
 
-  // All standard MSVC OpenSSL builds use C:\Program Files\Common Files\SSL
-  const certsDir = 'C:\\Program Files\\Common Files\\SSL\\certs'
+  // Pre-installed OpenSSL use C:\Program Files\Common Files\SSL
+  let certsDir = 'C:\\Program Files\\Common Files\\SSL\\certs'
   if (!fs.existsSync(certsDir)) {
-    fs.mkdirSync(certsDir)
+    fs.mkdirSync(certsDir, { recursive: true })
   }
 
   // cert.pem location is hard-coded by OpenSSL msvc builds
-  const cert = 'C:\\Program Files\\Common Files\\SSL\\cert.pem'
+  let cert = 'C:\\Program Files\\Common Files\\SSL\\cert.pem'
   if (!fs.existsSync(cert)) {
     fs.copyFileSync(certFile, cert)
   }
+
+  // vcpkg openssl uses packages\openssl_x64-windows\certs
+  certsDir = `${vcPkgBasePath}\\packages\\openssl_x64-windows\\certs`
+  if (!fs.existsSync(certsDir)) {
+    fs.mkdirSync(certsDir, { recursive: true })
+  }
+
+  // vcpkg openssl uses packages\openssl_x64-windows\cert.pem
+  cert = `${vcPkgBasePath}\\packages\\openssl_x64-windows\\cert.pem`
+  fs.copyFileSync(certFile, cert)
 
   return await common.measure('Setting up MSVC environment', async () => addVCVARSEnv())
 }
@@ -199,24 +230,17 @@ async function setupMSWin() {
  *   adds a convenience VCVARS environment variable
  *   this assumes a single Visual Studio version being available in the Windows images */
 export function addVCVARSEnv() {
-  let vcVars = ''
-  switch (virtualEnv) {
-    case 'windows-2016':
-      vcVars = '"C:\\Program Files (x86)\\Microsoft Visual Studio\\2017\\Enterprise\\VC\\Auxiliary\\Build\\vcvars64.bat"'
-      break
-    case 'windows-2019':
-      vcVars = '"C:\\Program Files (x86)\\Microsoft Visual Studio\\2019\\Enterprise\\VC\\Auxiliary\\Build\\vcvars64.bat"'
-      break
-    case 'windows-2022':
-      vcVars = '"C:\\Program Files\\Microsoft Visual Studio\\2022\\Enterprise\\VC\\Auxiliary\\Build\\vcvars64.bat"'
-      break
-    default:
-      throw new Error(`Unknown Windows Image: ${virtualEnv}`)
+  let cmd = 'vswhere -latest -property installationPath'
+  let vcVars = `${cp.execSync(cmd).toString().trim()}\\VC\\Auxiliary\\Build\\vcvars64.bat`
+
+  if (!fs.existsSync(vcVars)) {
+    throw new Error(`Missing vcVars file: ${vcVars}`)
   }
   core.exportVariable('VCVARS', vcVars)
 
+  cmd = `cmd.exe /c ""${vcVars}" && set"`
+
   let newEnv = new Map()
-  let cmd = `cmd.exe /c "${vcVars} && set"`
   let newSet = cp.execSync(cmd).toString().trim().split(/\r?\n/)
   newSet = newSet.filter(line => /\S=\S/.test(line))
   newSet.forEach(s => {

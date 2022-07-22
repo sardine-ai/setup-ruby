@@ -98,6 +98,17 @@ function getImageOS() {
   return imageOS
 }
 
+export const supportedPlatforms = [
+  'ubuntu-18.04',
+  'ubuntu-20.04',
+  'ubuntu-22.04',
+  'macos-10.15',
+  'macos-11',
+  'macos-12',
+  'windows-2019',
+  'windows-2022',
+]
+
 export function getVirtualEnvironmentName() {
   const imageOS = getImageOS()
 
@@ -108,7 +119,11 @@ export function getVirtualEnvironmentName() {
 
   match = imageOS.match(/^macos(\d{2})(\d+)?/) // e.g. macos1015, macos11
   if (match) {
-    return `macos-${match[1]}.${match[2] || '0'}`
+    if (match[2]) {
+      return `macos-${match[1]}.${match[2]}`
+    } else {
+      return `macos-${match[1]}`
+    }
   }
 
   match = imageOS.match(/^win(\d+)/) // e.g. win19
@@ -159,7 +174,7 @@ export function win2nix(path) {
 function rubyIsUCRT(path) {
   return !!(fs.existsSync(path) &&
     fs.readdirSync(path, { withFileTypes: true }).find(dirent =>
-      dirent.isFile() && dirent.name.match(/^x64-ucrt-ruby\d{3}\.dll$/)))
+      dirent.isFile() && dirent.name.match(/^x64-(ucrt|vcruntime\d{3})-ruby\d{3}\.dll$/)))
 }
 
 export function setupPath(newPathEntries) {

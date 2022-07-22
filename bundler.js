@@ -50,8 +50,13 @@ async function afterLockFile(lockFile, platform, engine, rubyVersion) {
   }
 }
 
-export async function installBundler(bundlerVersionInput, lockFile, platform, rubyPrefix, engine, rubyVersion) {
+export async function installBundler(bundlerVersionInput, rubygemsInputSet, lockFile, platform, rubyPrefix, engine, rubyVersion) {
   let bundlerVersion = bundlerVersionInput
+
+  if (rubygemsInputSet && bundlerVersion === 'default') {
+    console.log('Using the Bundler installed by updating RubyGems')
+    return 'unknown'
+  }
 
   if (bundlerVersion === 'default' || bundlerVersion === 'Gemfile.lock') {
     bundlerVersion = readBundledWithFromGemfileLock(lockFile)
@@ -65,34 +70,50 @@ export async function installBundler(bundlerVersionInput, lockFile, platform, ru
     bundlerVersion = '2'
   }
 
-  if (/^\d+/.test(bundlerVersion)) {
-    // OK
+  if (/^\d+(?:\.\d+){0,2}$/.test(bundlerVersion)) {
+    // OK - input is a 1, 2, or 3 part version number
   } else {
     throw new Error(`Cannot parse bundler input: ${bundlerVersion}`)
   }
 
-  if (engine === 'ruby' && common.floatVersion(rubyVersion) <= 2.2) {
-    console.log('Bundler 2 requires Ruby 2.3+, using Bundler 1 on Ruby <= 2.2')
-    bundlerVersion = '1'
-  } else if (engine === 'ruby' && /^2\.3\.[01]/.test(rubyVersion)) {
-    console.log('Ruby 2.3.0 and 2.3.1 have shipped with an old rubygems that only works with Bundler 1')
-    bundlerVersion = '1'
-  } else if (engine === 'jruby' && rubyVersion.startsWith('9.1')) { // JRuby 9.1 targets Ruby 2.3, treat it the same
-    console.log('JRuby 9.1 has a bug with Bundler 2 (https://github.com/ruby/setup-ruby/issues/108), using Bundler 1 instead on JRuby 9.1')
-    bundlerVersion = '1'
+  const floatVersion = common.floatVersion(rubyVersion)
+
+  // Use Bundler 1 when we know Bundler 2 does not work
+  if (bundlerVersion.startsWith('2')) {
+    if (engine === 'ruby' && floatVersion <= 2.2) {
+      console.log('Bundler 2 requires Ruby 2.3+, using Bundler 1 on Ruby <= 2.2')
+      bundlerVersion = '1'
+    } else if (engine === 'ruby' && /^2\.3\.[01]/.test(rubyVersion)) {
+      console.log('Ruby 2.3.0 and 2.3.1 have shipped with an old rubygems that only works with Bundler 1')
+      bundlerVersion = '1'
+    } else if (engine === 'jruby' && rubyVersion.startsWith('9.1')) { // JRuby 9.1 targets Ruby 2.3, treat it the same
+      console.log('JRuby 9.1 has a bug with Bundler 2 (https://github.com/ruby/setup-ruby/issues/108), using Bundler 1 instead on JRuby 9.1')
+      bundlerVersion = '1'
+    }
   }
 
-  if (common.isHeadVersion(rubyVersion) && common.isBundler2Default(engine, rubyVersion) && bundlerVersion.startsWith('2')) {
+  // Workaround for truffleruby 22.0 + latest Bundler, use shipped Bundler instead: https://github.com/oracle/truffleruby/issues/2586
+  const truffleruby22workaround = engine.startsWith('truffleruby') && rubyVersion.startsWith('22.0')
+  const useShippedBundler2 = common.isHeadVersion(rubyVersion) || truffleruby22workaround
+
+  if (useShippedBundler2 && common.isBundler2Default(engine, rubyVersion) && bundlerVersion.startsWith('2')) {
     // Avoid installing a newer Bundler version for head versions as it might not work.
     // For releases, even if they ship with Bundler 2 we install the latest Bundler.
-    console.log(`Using Bundler 2 shipped with ${engine}-${rubyVersion}`)
+    if (truffleruby22workaround) {
+      console.log(`Using Bundler 2 shipped with ${engine}-${rubyVersion} (workaround for https://github.com/oracle/truffleruby/issues/2586 on truffleruby 22.0)`)
+    } else {
+      console.log(`Using Bundler 2 shipped with ${engine}-${rubyVersion} (head versions do not always support the latest Bundler release)`)
+    }
   } else if (engine.startsWith('truffleruby') && common.isBundler1Default(engine, rubyVersion) && bundlerVersion.startsWith('1')) {
-    console.log(`Using Bundler 1 shipped with ${engine}-${rubyVersion}`)
+    console.log(`Using Bundler 1 shipped with ${engine}-${rubyVersion} (required for truffleruby < 21.0)`)
   } else {
     const gem = path.join(rubyPrefix, 'bin', 'gem')
-    const bundlerVersionConstraint = /^\d+\.\d+\.\d+/.test(bundlerVersion) ? bundlerVersion : `~> ${bundlerVersion}`
     // Workaround for https://github.com/rubygems/rubygems/issues/5245
-    const force = (platform.startsWith('windows-') && engine === 'ruby' && common.floatVersion(rubyVersion) >= 3.1) ? ['--force'] : []
+    const force = (platform.startsWith('windows-') && engine === 'ruby' && floatVersion >= 3.1) ? ['--force'] : []
+
+    const versionParts = [...bundlerVersion.matchAll(/\d+/g)].length
+    const bundlerVersionConstraint = versionParts === 3 ? bundlerVersion : `~> ${bundlerVersion}.0`
+
     await exec.exec(gem, ['install', 'bundler', ...force, '-v', bundlerVersionConstraint])
   }
 
@@ -187,8 +208,7 @@ async function computeBaseKey(platform, engine, version, lockFile, cacheVersion)
 
   if (common.isHeadVersion(version)) {
     if (engine !== 'jruby') {
-      // CRuby dev versions do not change the ABI version when the ABI changes, so use the commit as the ABI version
-      let print_abi = engine === 'ruby' ? 'print RUBY_REVISION' : "print RbConfig::CONFIG['ruby_version']"
+      let print_abi = "print RbConfig::CONFIG['ruby_version']"
       let abi = ''
       await exec.exec('ruby', ['-e', print_abi], {
         silent: true,

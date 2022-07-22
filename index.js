@@ -2,15 +2,18 @@ const os = require('os')
 const fs = require('fs')
 const path = require('path')
 const core = require('@actions/core')
+const exec = require('@actions/exec')
 const common = require('./common')
+const rubygems = require('./rubygems')
 const bundler = require('./bundler')
 
 const windows = common.windows
 
 const inputDefaults = {
   'ruby-version': 'default',
+  'rubygems': 'default',
   'bundler': 'default',
-  'bundler-cache': 'true',
+  'bundler-cache': 'false',
   'working-directory': '.',
   'cache-version': bundler.DEFAULT_CACHE_VERSION,
 }
@@ -20,7 +23,7 @@ export async function run() {
   try {
     await setupRuby()
   } catch (error) {
-    core.setFailed(error.message)
+    core.setFailed(error.stack)
   }
 }
 
@@ -39,7 +42,7 @@ export async function setupRuby(options = {}) {
   const [engine, parsedVersion] = parseRubyEngineAndVersion(inputs['ruby-version'])
 
   let installer
-  if (platform.startsWith('windows-') && engine !== 'jruby') {
+  if (platform.startsWith('windows-') && engine === 'ruby') {
     installer = require('./windows')
   } else {
     installer = require('./ruby-builder')
@@ -60,6 +63,15 @@ export async function setupRuby(options = {}) {
 
   const rubyPrefix = await installer.install(platform, engine, version)
 
+  await common.measure('Print Ruby version', async () =>
+    await exec.exec('ruby', ['--version']))
+
+  const rubygemsInputSet = inputs['rubygems'] !== 'default'
+  if (rubygemsInputSet) {
+    await common.measure('Updating RubyGems', async () =>
+      rubygems.rubygemsUpdate(inputs['rubygems'], rubyPrefix))
+  }
+
   // When setup-ruby is used by other actions, this allows code in them to run
   // before 'bundle install'.  Installed dependencies may require additional
   // libraries & headers, build tools, etc.
@@ -67,16 +79,17 @@ export async function setupRuby(options = {}) {
     await inputs['afterSetupPathHook']({ platform, rubyPrefix, engine, version })
   }
 
+  const [gemfile, lockFile] = bundler.detectGemfiles()
+  let bundlerVersion = 'unknown'
+
   if (inputs['bundler'] !== 'none') {
-    const [gemfile, lockFile] = bundler.detectGemfiles()
+    bundlerVersion = await common.measure('Installing Bundler', async () =>
+      bundler.installBundler(inputs['bundler'], rubygemsInputSet, lockFile, platform, rubyPrefix, engine, version))
+  }
 
-    const bundlerVersion = await common.measure('Installing Bundler', async () =>
-      bundler.installBundler(inputs['bundler'], lockFile, platform, rubyPrefix, engine, version))
-
-    if (inputs['bundler-cache'] === 'true') {
-      await common.measure('bundle install', async () =>
-        bundler.bundleInstall(gemfile, lockFile, platform, engine, version, bundlerVersion, inputs['cache-version']))
-    }
+  if (inputs['bundler-cache'] === 'true') {
+    await common.measure('bundle install', async () =>
+      bundler.bundleInstall(gemfile, lockFile, platform, engine, version, bundlerVersion, inputs['cache-version']))
   }
 
   core.setOutput('ruby-prefix', rubyPrefix)
@@ -137,8 +150,7 @@ function validateRubyEngineAndVersion(platform, engineVersions, engine, parsedVe
     } else {
       throw new Error(`Unknown version ${parsedVersion} for ${engine} on ${platform}
         available versions for ${engine} on ${platform}: ${engineVersions.join(', ')}
-        Make sure you use the latest version of the action with - uses: ruby/setup-ruby@v1
-        File an issue at https://github.com/ruby/setup-ruby/issues if would like support for a new version`)
+        Make sure you use the latest version of the action with - uses: ruby/setup-ruby@v1`)
     }
   }
 
