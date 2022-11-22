@@ -55,8 +55,20 @@ export function isStableVersion(rubyVersion) {
   return /^\d+(\.\d+)*$/.test(rubyVersion)
 }
 
+export function hasBundlerDefaultGem(engine, rubyVersion) {
+  return isBundler1Default(engine, rubyVersion) || isBundler2Default(engine, rubyVersion)
+}
+
 export function isBundler1Default(engine, rubyVersion) {
-  return !isBundler2Default(engine, rubyVersion)
+  if (engine === 'ruby') {
+    return floatVersion(rubyVersion) >= 2.6 && floatVersion(rubyVersion) < 2.7
+  } else if (engine.startsWith('truffleruby')) {
+    return floatVersion(rubyVersion) < 21.0
+  } else if (engine === 'jruby') {
+    return false
+  } else {
+    return false
+  }
 }
 
 export function isBundler2Default(engine, rubyVersion) {
@@ -64,6 +76,18 @@ export function isBundler2Default(engine, rubyVersion) {
     return floatVersion(rubyVersion) >= 2.7
   } else if (engine.startsWith('truffleruby')) {
     return floatVersion(rubyVersion) >= 21.0
+  } else if (engine === 'jruby') {
+    return floatVersion(rubyVersion) >= 9.3
+  } else {
+    return false
+  }
+}
+
+export function isBundler2dot2Default(engine, rubyVersion) {
+  if (engine === 'ruby') {
+    return floatVersion(rubyVersion) >= 3.0
+  } else if (engine.startsWith('truffleruby')) {
+    return floatVersion(rubyVersion) >= 22.0
   } else if (engine === 'jruby') {
     return floatVersion(rubyVersion) >= 9.3
   } else {

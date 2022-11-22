@@ -9,19 +9,17 @@ on:
     paths-ignore:
     - README.md
   workflow_dispatch:
+permissions:
+  contents: read
 
 jobs:
   test:
     strategy:
       fail-fast: false
       matrix:
-        os: [ ubuntu-18.04, ubuntu-20.04, macos-10.15, macos-11, macos-12, windows-2019, windows-2022 ]
+        os: [ ubuntu-18.04, ubuntu-20.04, ubuntu-22.04, macos-10.15, macos-11, macos-12, windows-2019, windows-2022 ]
         ruby: [ '1.9', '2.0', '2.1', '2.2', '2.3', '2.4', '2.5', '2.6', '2.7', '3.0', '3.1', ruby-head, jruby, jruby-head, truffleruby, truffleruby-head, truffleruby+graalvm, truffleruby+graalvm-head ]
         include:
-        - { os: ubuntu-22.04, ruby: '3.1.0' }
-        - { os: ubuntu-22.04, ruby: '3.1' }
-        - { os: ubuntu-22.04, ruby: '3.2.0-preview1' }
-        - { os: ubuntu-22.04, ruby: ruby-head }
         - { os: windows-2019, ruby: mingw }
         - { os: windows-2019, ruby: mswin }
         - { os: windows-2022, ruby: mingw }
@@ -98,14 +96,36 @@ jobs:
     - run: bundle exec rake --version
     - run: bundle exec rake
 
-    - name: which ruby, rake
+    # Ensure the same bundle commands work in bash on Windows
+    - name: bundle install (bash)
+      run: bundle install
+      shell: bash
+      if: startsWith(matrix.os, 'windows')
+    - name: bundle exec rake --version (bash)
+      run: bundle exec rake --version
+      shell: bash
+      if: startsWith(matrix.os, 'windows')
+    - name: bundle exec rake (bash)
+      run: bundle exec rake
+      shell: bash
+      if: startsWith(matrix.os, 'windows')
+
+    - name: Test `gem github:` in a Gemfile
+      run: bundle install
+      env:
+        BUNDLE_GEMFILE: ${{ github.workspace }}/gemfiles/gem_from_github.gemfile
+
+    - name: which ruby, bundle
+      shell: bash
+      run: which -a ruby bundle
+    - name: which rake
+      run: which -a rake
       if: "!startsWith(matrix.os, 'windows')"
-      run: which -a ruby rake
-    - name: where ruby, rake
+    - name: where ruby, rake, bundle
       if: startsWith(matrix.os, 'windows')
       run: |
         $ErrorActionPreference = 'Continue'
-        $where = 'ruby', 'rake'
+        $where = 'ruby', 'rake', 'bundle'
         foreach ($e in $where) {
           $rslt = where.exe $e 2>&1 | Out-String
           if ($rslt.contains($e)) { echo $rslt.Trim() }
@@ -114,10 +134,21 @@ jobs:
         }
     - name: bash test
       shell: bash
-      run: echo ~
+      run: echo ~ && bundle install
     - name: Windows JRuby
       if: startsWith(matrix.os, 'windows') && startsWith(matrix.ruby, 'jruby')
       run: gem install sassc
+
+  testNoGemfile:
+    name: "Test with no Gemfile"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - run: rm Gemfile
+      - uses: ./
+        with:
+          ruby-version: '2.6'
+      - run: ruby -v
 
   testLatestRubygemsVersion:
     name: "Test rubygems: latest upgrades the default RubyGems version"

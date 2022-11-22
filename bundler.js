@@ -53,15 +53,40 @@ async function afterLockFile(lockFile, platform, engine, rubyVersion) {
 export async function installBundler(bundlerVersionInput, rubygemsInputSet, lockFile, platform, rubyPrefix, engine, rubyVersion) {
   let bundlerVersion = bundlerVersionInput
 
-  if (rubygemsInputSet && bundlerVersion === 'default') {
+  if (rubygemsInputSet && (bundlerVersion === 'default' || bundlerVersion === 'Gemfile.lock')) {
     console.log('Using the Bundler installed by updating RubyGems')
     return 'unknown'
   }
 
-  if (bundlerVersion === 'default' || bundlerVersion === 'Gemfile.lock') {
-    bundlerVersion = readBundledWithFromGemfileLock(lockFile)
+  if (bundlerVersion === 'Gemfile.lock') {
+    let bundlerVersionFromGemfileLock = readBundledWithFromGemfileLock(lockFile)
 
-    if (!bundlerVersion) {
+    if (bundlerVersionFromGemfileLock) {
+      bundlerVersion = bundlerVersionFromGemfileLock
+    } else {
+      bundlerVersion = 'default'
+    }
+  }
+
+  const floatVersion = common.floatVersion(rubyVersion)
+
+  if (bundlerVersion === 'default') {
+    if (common.isBundler2dot2Default(engine, rubyVersion)) {
+      if (common.windows && engine === 'ruby' && (common.isStableVersion(rubyVersion) || rubyVersion === 'head')) {
+        // https://github.com/ruby/setup-ruby/issues/371
+        console.log(`Installing latest Bundler for ${engine}-${rubyVersion} on Windows because bin/bundle does not work in bash otherwise`)
+        bundlerVersion = 'latest'
+      } else {
+        console.log(`Using Bundler 2 shipped with ${engine}-${rubyVersion}`)
+        return '2'
+      }
+    } else if (common.hasBundlerDefaultGem(engine, rubyVersion)) {
+      // Those Rubies have a old Bundler default gem < 2.2 which does not work well for `gem 'foo', github: 'foo/foo'`:
+      // https://github.com/ruby/setup-ruby/issues/358#issuecomment-1195899304
+      // Also, Ruby 2.6 would get Bundler 1 yet Ruby 2.3 - 2.5 get latest Bundler 2 which might be unexpected.
+      console.log(`Using latest Bundler for ${engine}-${rubyVersion} because the default Bundler gem is too old for that Ruby version`)
+      bundlerVersion = 'latest'
+    } else {
       bundlerVersion = 'latest'
     }
   }
@@ -75,8 +100,6 @@ export async function installBundler(bundlerVersionInput, rubygemsInputSet, lock
   } else {
     throw new Error(`Cannot parse bundler input: ${bundlerVersion}`)
   }
-
-  const floatVersion = common.floatVersion(rubyVersion)
 
   // Use Bundler 1 when we know Bundler 2 does not work
   if (bundlerVersion.startsWith('2')) {
@@ -92,30 +115,15 @@ export async function installBundler(bundlerVersionInput, rubygemsInputSet, lock
     }
   }
 
-  // Workaround for truffleruby 22.0 + latest Bundler, use shipped Bundler instead: https://github.com/oracle/truffleruby/issues/2586
-  const truffleruby22workaround = engine.startsWith('truffleruby') && rubyVersion.startsWith('22.0')
-  const useShippedBundler2 = common.isHeadVersion(rubyVersion) || truffleruby22workaround
+  const gem = path.join(rubyPrefix, 'bin', 'gem')
+  // Workaround for https://github.com/rubygems/rubygems/issues/5245
+  // and for https://github.com/oracle/truffleruby/issues/2780
+  const force = ((platform.startsWith('windows-') && engine === 'ruby' && floatVersion >= 3.1) || (engine === 'truffleruby')) ? ['--force'] : []
 
-  if (useShippedBundler2 && common.isBundler2Default(engine, rubyVersion) && bundlerVersion.startsWith('2')) {
-    // Avoid installing a newer Bundler version for head versions as it might not work.
-    // For releases, even if they ship with Bundler 2 we install the latest Bundler.
-    if (truffleruby22workaround) {
-      console.log(`Using Bundler 2 shipped with ${engine}-${rubyVersion} (workaround for https://github.com/oracle/truffleruby/issues/2586 on truffleruby 22.0)`)
-    } else {
-      console.log(`Using Bundler 2 shipped with ${engine}-${rubyVersion} (head versions do not always support the latest Bundler release)`)
-    }
-  } else if (engine.startsWith('truffleruby') && common.isBundler1Default(engine, rubyVersion) && bundlerVersion.startsWith('1')) {
-    console.log(`Using Bundler 1 shipped with ${engine}-${rubyVersion} (required for truffleruby < 21.0)`)
-  } else {
-    const gem = path.join(rubyPrefix, 'bin', 'gem')
-    // Workaround for https://github.com/rubygems/rubygems/issues/5245
-    const force = (platform.startsWith('windows-') && engine === 'ruby' && floatVersion >= 3.1) ? ['--force'] : []
+  const versionParts = [...bundlerVersion.matchAll(/\d+/g)].length
+  const bundlerVersionConstraint = versionParts === 3 ? bundlerVersion : `~> ${bundlerVersion}.0`
 
-    const versionParts = [...bundlerVersion.matchAll(/\d+/g)].length
-    const bundlerVersionConstraint = versionParts === 3 ? bundlerVersion : `~> ${bundlerVersion}.0`
-
-    await exec.exec(gem, ['install', 'bundler', ...force, '-v', bundlerVersionConstraint])
-  }
+  await exec.exec(gem, ['install', 'bundler', ...force, '-v', bundlerVersionConstraint])
 
   return bundlerVersion
 }
@@ -204,7 +212,7 @@ export async function bundleInstall(gemfile, lockFile, platform, engine, rubyVer
 
 async function computeBaseKey(platform, engine, version, lockFile, cacheVersion) {
   const cacheVersionSuffix = DEFAULT_CACHE_VERSION === cacheVersion ? '' : `-cachever:${cacheVersion}`
-  let key = `setup-ruby-bundler-cache-v3-${platform}-${engine}-${version}${cacheVersionSuffix}`
+  let key = `setup-ruby-bundler-cache-v4-${platform}-${engine}-${version}${cacheVersionSuffix}`
 
   if (common.isHeadVersion(version)) {
     if (engine !== 'jruby') {
