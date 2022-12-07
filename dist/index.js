@@ -8,6 +8,7 @@
 __nccwpck_require__.r(__webpack_exports__);
 /* harmony export */ __nccwpck_require__.d(__webpack_exports__, {
 /* harmony export */   "DEFAULT_CACHE_VERSION": () => (/* binding */ DEFAULT_CACHE_VERSION),
+/* harmony export */   "BUNDLER_VERSION_REGEXP": () => (/* binding */ BUNDLER_VERSION_REGEXP),
 /* harmony export */   "detectGemfiles": () => (/* binding */ detectGemfiles),
 /* harmony export */   "installBundler": () => (/* binding */ installBundler),
 /* harmony export */   "bundleInstall": () => (/* binding */ bundleInstall)
@@ -20,6 +21,7 @@ const cache = __nccwpck_require__(7799)
 const common = __nccwpck_require__(4717)
 
 const DEFAULT_CACHE_VERSION = '0'
+const BUNDLER_VERSION_REGEXP = /^\d+(?:\.\d+){0,2}$/
 
 // The returned gemfile is guaranteed to exist, the lockfile might not exist
 function detectGemfiles() {
@@ -44,10 +46,14 @@ function readBundledWithFromGemfileLock(lockFile) {
     const bundledWithLine = lines.findIndex(line => /^BUNDLED WITH$/.test(line.trim()))
     if (bundledWithLine !== -1) {
       const nextLine = lines[bundledWithLine+1]
-      if (nextLine && /^\d+/.test(nextLine.trim())) {
+      if (nextLine) {
         const bundlerVersion = nextLine.trim()
-        console.log(`Using Bundler ${bundlerVersion} from ${lockFile} BUNDLED WITH ${bundlerVersion}`)
-        return bundlerVersion
+        if (BUNDLER_VERSION_REGEXP.test(bundlerVersion)) {
+          console.log(`Using Bundler ${bundlerVersion} from ${lockFile} BUNDLED WITH ${bundlerVersion}`)
+          return bundlerVersion
+        } else {
+          console.log(`Could not parse BUNDLED WITH version as a valid Bundler release, ignoring it: ${bundlerVersion}`)
+        }
       }
     }
   }
@@ -109,7 +115,7 @@ async function installBundler(bundlerVersionInput, rubygemsInputSet, lockFile, p
     bundlerVersion = '2'
   }
 
-  if (/^\d+(?:\.\d+){0,2}$/.test(bundlerVersion)) {
+  if (BUNDLER_VERSION_REGEXP.test(bundlerVersion)) {
     // OK - input is a 1, 2, or 3 part version number
   } else {
     throw new Error(`Cannot parse bundler input: ${bundlerVersion}`)
@@ -68581,7 +68587,7 @@ module.exports = JSON.parse('[[[0,44],"disallowed_STD3_valid"],[[45,46],"valid"]
 /***/ ((module) => {
 
 "use strict";
-module.exports = JSON.parse('{"ruby":["1.9.3-p551","2.0.0-p648","2.1.9","2.2.10","2.3.0","2.3.1","2.3.2","2.3.3","2.3.4","2.3.5","2.3.6","2.3.7","2.3.8","2.4.0","2.4.1","2.4.2","2.4.3","2.4.4","2.4.5","2.4.6","2.4.7","2.4.9","2.4.10","2.5.0","2.5.1","2.5.2","2.5.3","2.5.4","2.5.5","2.5.6","2.5.7","2.5.8","2.5.9","2.6.0","2.6.1","2.6.2","2.6.3","2.6.4","2.6.5","2.6.6","2.6.7","2.6.8","2.6.9","2.6.10","2.7.0","2.7.1","2.7.2","2.7.3","2.7.4","2.7.5","2.7.6","3.0.0-preview1","3.0.0-preview2","3.0.0-rc1","3.0.0","3.0.1","3.0.2","3.0.3","3.0.4","3.1.0-preview1","3.1.0","3.1.1","3.1.2","3.2.0-preview1","3.2.0-preview2","3.2.0-preview3","head","debug"],"jruby":["9.1.17.0","9.2.9.0","9.2.10.0","9.2.11.0","9.2.11.1","9.2.12.0","9.2.13.0","9.2.14.0","9.2.15.0","9.2.16.0","9.2.17.0","9.2.18.0","9.2.19.0","9.2.20.0","9.2.20.1","9.2.21.0","9.3.0.0","9.3.1.0","9.3.2.0","9.3.3.0","9.3.4.0","9.3.6.0","9.3.7.0","9.3.8.0","9.3.9.0","head"],"truffleruby":["19.3.0","19.3.1","20.0.0","20.1.0","20.2.0","20.3.0","21.0.0","21.1.0","21.2.0","21.2.0.1","21.3.0","22.0.0.2","22.1.0","22.2.0","22.3.0","head"],"truffleruby+graalvm":["21.2.0","21.3.0","22.0.0.2","22.1.0","22.2.0","22.3.0","head"]}');
+module.exports = JSON.parse('{"ruby":["1.9.3-p551","2.0.0-p648","2.1.9","2.2.10","2.3.0","2.3.1","2.3.2","2.3.3","2.3.4","2.3.5","2.3.6","2.3.7","2.3.8","2.4.0","2.4.1","2.4.2","2.4.3","2.4.4","2.4.5","2.4.6","2.4.7","2.4.9","2.4.10","2.5.0","2.5.1","2.5.2","2.5.3","2.5.4","2.5.5","2.5.6","2.5.7","2.5.8","2.5.9","2.6.0","2.6.1","2.6.2","2.6.3","2.6.4","2.6.5","2.6.6","2.6.7","2.6.8","2.6.9","2.6.10","2.7.0","2.7.1","2.7.2","2.7.3","2.7.4","2.7.5","2.7.6","2.7.7","3.0.0-preview1","3.0.0-preview2","3.0.0-rc1","3.0.0","3.0.1","3.0.2","3.0.3","3.0.4","3.0.5","3.1.0-preview1","3.1.0","3.1.1","3.1.2","3.1.3","3.2.0-preview1","3.2.0-preview2","3.2.0-preview3","3.2.0-rc1","head","debug"],"jruby":["9.1.17.0","9.2.9.0","9.2.10.0","9.2.11.0","9.2.11.1","9.2.12.0","9.2.13.0","9.2.14.0","9.2.15.0","9.2.16.0","9.2.17.0","9.2.18.0","9.2.19.0","9.2.20.0","9.2.20.1","9.2.21.0","9.3.0.0","9.3.1.0","9.3.2.0","9.3.3.0","9.3.4.0","9.3.6.0","9.3.7.0","9.3.8.0","9.3.9.0","9.4.0.0","head"],"truffleruby":["19.3.0","19.3.1","20.0.0","20.1.0","20.2.0","20.3.0","21.0.0","21.1.0","21.2.0","21.2.0.1","21.3.0","22.0.0.2","22.1.0","22.2.0","22.3.0","head"],"truffleruby+graalvm":["21.2.0","21.3.0","22.0.0.2","22.1.0","22.2.0","22.3.0","head"]}');
 
 /***/ }),
 

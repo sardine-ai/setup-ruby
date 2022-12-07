@@ -18,7 +18,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ ubuntu-18.04, ubuntu-20.04, ubuntu-22.04, macos-10.15, macos-11, macos-12, windows-2019, windows-2022 ]
-        ruby: [ '1.9', '2.0', '2.1', '2.2', '2.3', '2.4', '2.5', '2.6', '2.7', '3.0', '3.1', ruby-head, jruby, jruby-head, truffleruby, truffleruby-head, truffleruby+graalvm, truffleruby+graalvm-head ]
+        ruby: [ '1.9', '2.0', '2.1', '2.2', '2.3', '2.4', '2.5', '2.6', '2.7', '3.0', '3.1', '3.2', ruby-head, jruby, jruby-head, truffleruby, truffleruby-head, truffleruby+graalvm, truffleruby+graalvm-head ]
         include:
         - { os: windows-2019, ruby: mingw }
         - { os: windows-2019, ruby: mswin }
@@ -27,12 +27,14 @@ jobs:
         - { os: windows-2022, ruby: ucrt  }
         exclude:
         - { os: windows-2019, ruby: '1.9' }
+        - { os: windows-2019, ruby: '3.2' }
         - { os: windows-2019, ruby: debug }
         - { os: windows-2019, ruby: truffleruby }
         - { os: windows-2019, ruby: truffleruby-head }
         - { os: windows-2019, ruby: truffleruby+graalvm }
         - { os: windows-2019, ruby: truffleruby+graalvm-head }
         - { os: windows-2022, ruby: '1.9' }
+        - { os: windows-2022, ruby: '3.2' }
         - { os: windows-2022, ruby: debug }
         - { os: windows-2022, ruby: truffleruby }
         - { os: windows-2022, ruby: truffleruby-head }
@@ -184,6 +186,7 @@ jobs:
     - run: gem --version | grep -F "3.3.3"
 
   testUseBundlerFromRubyGemsUpdate:
+    if: false # https://github.com/ruby/setup-ruby/issues/405
     name: "Test rubygems: version uses the Bundler installed by the rubygems update"
     runs-on: ubuntu-latest
     steps:
@@ -238,6 +241,18 @@ jobs:
         ruby-version: '2.6'
         bundler: 2.2.3
     - run: bundle --version | grep -F "Bundler version 2.2.3"
+
+  testBundlerDev:
+    name: "Test BUNDLED WITH Bundler dev"
+    runs-on: ubuntu-latest
+    env:
+      BUNDLE_GEMFILE: ${{ github.workspace }}/gemfiles/bundler-dev.gemfile
+    steps:
+      - uses: actions/checkout@v3
+      - uses: ./
+        with:
+          ruby-version: ruby-head
+          bundler-cache: true
 
   testDependencyOnBundler1:
     name: "Test gemfile depending on Bundler 1"
